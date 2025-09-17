@@ -1,14 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
-// Dynamically import pdf-parse to handle potential import issues
-let pdfParse: any;
-try {
-  pdfParse = require('pdf-parse');
-} catch (error) {
-  console.error('pdf-parse not found. Please install it with: npm install pdf-parse');
-}
-
 interface Transaction {
   id: string;
   date: string;
@@ -42,183 +34,279 @@ const CATEGORIES = [
 
 export async function POST(request: NextRequest) {
   try {
-    console.log('API route called');
-
-    // Check if pdf-parse is available
-    if (!pdfParse) {
-      return NextResponse.json({ 
-        error: 'pdf-parse dependency not found. Please run: npm install pdf-parse @types/pdf-parse' 
-      }, { status: 500 });
-    }
+    console.log('Bank Statement Processor API called');
 
     const formData = await request.formData();
     const file = formData.get('file') as File;
-    console.log('File received:', file?.name, file?.type);
+    const manualText = formData.get('manualText') as string;
+    
+    console.log(`Request type: ${manualText ? 'Manual text input' : 'PDF upload'}`);
 
+    // Handle manual text input
+    if (manualText && manualText.trim().length > 0) {
+      console.log(`Processing manual text input: ${manualText.length} characters`);
+      return await processTransactionText(manualText.trim());
+    }
+
+    // Handle PDF upload
     if (!file) {
-      return NextResponse.json({ error: 'No file provided' }, { status: 400 });
-    }
-
-    if (file.type !== 'application/pdf') {
-      return NextResponse.json({ error: 'File must be a PDF' }, { status: 400 });
-    }
-
-    // Check OpenAI API key
-    if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json({ 
-        error: 'OpenAI API key not configured. Please add OPENAI_API_KEY to your .env.local file' 
-      }, { status: 500 });
-    }
-
-    console.log('Extracting PDF text...');
-    // Extract text from PDF
-    const buffer = await file.arrayBuffer();
-    const pdfData = await pdfParse(Buffer.from(buffer));
-    const pdfText = pdfData.text;
-    console.log('PDF text extracted, length:', pdfText.length);
-
-    if (!pdfText || pdfText.trim().length === 0) {
-      return NextResponse.json({ 
-        error: 'No text found in PDF. Please ensure the PDF contains readable text.' 
+        error: 'No file or text provided',
+        helpMessage: 'You can either upload a PDF or paste transaction text directly.',
+        suggestions: [
+          'Upload a PDF bank statement',
+          'Or copy and paste transaction data from your online banking',
+          'Or use the manual text input option'
+        ]
       }, { status: 400 });
     }
 
-    // Initialize OpenAI
-    console.log('Initializing OpenAI...');
+    console.log(`File received: ${file.name}, Type: ${file.type}, Size: ${file.size} bytes`);
+
+    if (file.type !== 'application/pdf') {
+      return NextResponse.json({ 
+        error: 'File must be a PDF. Received: ' + file.type 
+      }, { status: 400 });
+    }
+
+    // For now, since PDF extraction is problematic, provide helpful guidance
+    // and suggest alternative approaches
+    return NextResponse.json({
+      extractionFailed: true,
+      message: 'PDF text extraction is not working reliably with your bank\'s PDF format.',
+      alternativeSolutions: {
+        option1: {
+          title: 'Copy & Paste Method (Recommended)',
+          description: 'Copy transaction data directly from your online banking and paste it below',
+          instructions: [
+            '1. Log into your online banking',
+            '2. View your account transactions',
+            '3. Select and copy the transaction data',
+            '4. Use the text input option instead of PDF upload'
+          ]
+        },
+        option2: {
+          title: 'Export Different Format',
+          description: 'Download your statement in CSV or Excel format',
+          instructions: [
+            '1. Go to your bank\'s statement download section',
+            '2. Choose CSV or Excel format instead of PDF',
+            '3. This app can be modified to handle these formats'
+          ]
+        },
+        option3: {
+          title: 'Manual Entry',
+          description: 'Type in your transactions manually for categorization',
+          instructions: [
+            '1. Use the manual input form',
+            '2. Enter each transaction: Date, Description, Amount',
+            '3. Let AI categorize them automatically'
+          ]
+        }
+      },
+      sampleFormat: 'Expected format:\nJul 14 PREAUTHORIZED DEBIT TOYOTA FINANCE 254.18\nJul 25 E-TRANSFER Canadian National VanLine 1687.20\nJul 31 SERVICE CHARGE MONTHLY FEE 6.95',
+      fileInfo: {
+        name: file.name,
+        size: file.size,
+        type: file.type
+      }
+    }, { status: 200 }); // Return 200 so frontend can handle this gracefully
+
+  } catch (error) {
+    console.error('Error in POST handler:', error);
+    
+    return NextResponse.json({
+      error: 'Server error occurred',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      timestamp: new Date().toISOString()
+    }, { status: 500 });
+  }
+}
+
+// Process transaction text (from manual input or successful PDF extraction)
+async function processTransactionText(text: string): Promise<NextResponse> {
+  try {
+    // Validate OpenAI API key
+    if (!process.env.OPENAI_API_KEY) {
+      return NextResponse.json({ 
+        error: 'OpenAI API key not configured. Please add OPENAI_API_KEY to your environment variables.' 
+      }, { status: 500 });
+    }
+
+    console.log('Processing transaction text with OpenAI...');
+    
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
 
-    console.log('Calling OpenAI API...');
-    // Use GPT-4o to extract and categorize transactions
-    const response = await openai.chat.completions.create({
+    const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         {
           role: 'system',
-          content: `You are an expert at extracting and categorizing financial transactions from bank statements. 
+          content: `You are a financial transaction categorization expert. Analyze the provided transaction text and extract expense transactions.
 
-Your task is to:
-1. Extract all transactions from the provided bank statement text
-2. Categorize each transaction into one of these categories: Living Expenses, Groceries, Restaurants, Car, Entertainment, Miscellaneous
-3. Provide a confidence score (0-1) for each categorization
+RULES:
+1. Extract ONLY expense transactions (money going OUT of the account)
+2. Skip deposits, credits, incoming transfers, account balances
+3. Look for: purchases, payments, withdrawals, debits, fees, charges
 
-Guidelines for categorization:
-- Living Expenses: Rent, utilities (electricity, gas, water, internet, phone bills), insurance, subscriptions
+CATEGORIES:
+- Living Expenses: Utilities, rent, insurance, service charges, bank fees, phone/internet bills
 - Groceries: Supermarkets, food stores, grocery chains
-- Restaurants: Dining out, takeout, cafes, bars, food delivery
-- Car: Gas stations, parking, car maintenance, car payments, tolls
-- Entertainment: Movies, concerts, games, streaming services, sports events
-- Miscellaneous: Everything else that doesn't fit the above categories
+- Restaurants: Dining out, takeout, cafes, food delivery, coffee shops
+- Car: Gas stations, car payments, auto insurance, parking, maintenance
+- Entertainment: Movies, streaming services, concerts, games, sports events
+- Miscellaneous: Everything else that doesn't fit above categories
 
-Return your response as a JSON object with this structure:
+TRANSACTION PATTERNS TO RECOGNIZE:
+- "Jul 14 MERCHANT NAME 123.45"
+- "2025-07-14 Description $123.45"
+- "DEBIT MERCHANT 123.45"
+- "PREAUTHORIZED PAYMENT COMPANY 123.45"
+
+DATE HANDLING:
+- Convert all dates to YYYY-MM-DD format
+- "Jul 14" → "2025-07-14"
+- "14/07" → "2025-07-14"
+- If no year specified, assume 2025
+
+RESPONSE FORMAT:
 {
   "transactions": [
     {
-      "id": "unique_id",
-      "date": "YYYY-MM-DD", 
-      "description": "cleaned transaction description",
+      "id": "txn_001",
+      "date": "YYYY-MM-DD",
+      "description": "Clean merchant/service name",
       "amount": -123.45,
-      "category": "category_name",
+      "category": "Category Name",
       "confidence": 0.95
     }
   ]
 }
 
-Important notes:
-- Only include actual expense transactions (negative amounts or debits)
-- Skip payments, transfers, credits, and account fees
-- Use negative amounts for expenses
-- Extract the date in YYYY-MM-DD format
-- Clean up the description to be readable
-- Be consistent with your categorization logic
-- Don't include duplicate transactions
-- If no transactions found, return empty array`
+IMPORTANT:
+- ALL expense amounts must be NEGATIVE (-123.45)
+- Generate sequential IDs (txn_001, txn_002, etc.)
+- Clean descriptions but keep key merchant info
+- Confidence: 0.9+ for clear matches, 0.7+ for likely matches, 0.5+ for uncertain
+- If no expenses found, return empty transactions array`
         },
         {
           role: 'user',
-          content: `Please extract and categorize all expense transactions from this bank statement text:\n\n${pdfText.substring(0, 10000)}`
+          content: `Extract and categorize expense transactions from this text:\n\n${text}`
         }
       ],
       temperature: 0.1,
-      max_tokens: 4000,
+      max_tokens: 3000,
     });
 
-    console.log('OpenAI response received');
-    const responseText = response.choices[0]?.message?.content;
-    if (!responseText) {
+    const aiResponse = completion.choices[0]?.message?.content;
+    if (!aiResponse) {
       throw new Error('No response from OpenAI');
     }
 
-    console.log('Parsing OpenAI response...');
-    let parsedResponse;
+    console.log('Parsing AI response...');
+    
+    let parsedData;
     try {
-      // Try to extract JSON from the response
-      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        parsedResponse = JSON.parse(jsonMatch[0]);
+        parsedData = JSON.parse(jsonMatch[0]);
       } else {
-        parsedResponse = JSON.parse(responseText);
+        parsedData = JSON.parse(aiResponse);
       }
     } catch (parseError) {
-      console.error('Failed to parse OpenAI response:', responseText);
-      // Return a fallback response with sample data for testing
-      parsedResponse = {
-        transactions: [
-          {
-            id: 'sample_1',
-            date: '2025-07-11',
-            description: 'BELL CANADA (OB) MONTREAL QC',
-            amount: -119.91,
-            category: 'Living Expenses',
-            confidence: 0.95
-          }
-        ]
-      };
+      console.error('Failed to parse AI response:', aiResponse);
+      return NextResponse.json({
+        error: 'Failed to parse AI response',
+        aiResponse: aiResponse.substring(0, 500),
+        inputText: text.substring(0, 200)
+      }, { status: 500 });
     }
 
-    const transactions: Transaction[] = parsedResponse.transactions || [];
+    // Process and validate transactions
+    const rawTransactions = parsedData.transactions || [];
+    console.log(`AI identified ${rawTransactions.length} transactions`);
 
-    // Generate unique IDs for transactions if not provided
-    transactions.forEach((transaction, index) => {
-      if (!transaction.id) {
-        transaction.id = `txn_${Date.now()}_${index}`;
+    const validTransactions: Transaction[] = [];
+    
+    rawTransactions.forEach((transaction: any, index: number) => {
+      // Validate required fields
+      if (!transaction.date || !transaction.description || typeof transaction.amount !== 'number') {
+        console.log(`Skipping invalid transaction:`, transaction);
+        return;
       }
+
+      // Ensure amount is negative (expense)
+      const amount = transaction.amount > 0 ? -Math.abs(transaction.amount) : transaction.amount;
+
+      // Validate category
+      let category = transaction.category;
+      if (!CATEGORIES.includes(category)) {
+        console.log(`Invalid category "${category}", defaulting to Miscellaneous`);
+        category = 'Miscellaneous';
+      }
+
+      // Validate date format
+      const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+      if (!dateRegex.test(transaction.date)) {
+        console.log(`Invalid date format: ${transaction.date}`);
+        return;
+      }
+
+      validTransactions.push({
+        id: transaction.id || `txn_${String(index + 1).padStart(3, '0')}`,
+        date: transaction.date,
+        description: transaction.description.trim(),
+        amount: Math.round(amount * 100) / 100, // Round to 2 decimal places
+        category: category,
+        confidence: Math.min(Math.max(transaction.confidence || 0.8, 0.5), 1.0)
+      });
     });
+
+    console.log(`Successfully processed ${validTransactions.length} valid transactions`);
 
     // Calculate summary by category
     const summary = CATEGORIES.reduce((acc, category) => {
-      acc[category] = transactions
+      acc[category] = validTransactions
         .filter(t => t.category === category)
         .reduce((sum, t) => sum + Math.abs(t.amount), 0);
       return acc;
     }, {} as ProcessedData['summary']);
 
-    const totalAmount = transactions.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+    // Round summary values
+    Object.keys(summary).forEach(key => {
+      summary[key as keyof ProcessedData['summary']] = Math.round(summary[key as keyof ProcessedData['summary']] * 100) / 100;
+    });
+
+    const totalAmount = Math.round(validTransactions.reduce((sum, t) => sum + Math.abs(t.amount), 0) * 100) / 100;
 
     const result: ProcessedData = {
-      transactions,
+      transactions: validTransactions,
       totalAmount,
       summary
     };
 
-    console.log('Processing complete, returning result');
-    return NextResponse.json(result);
+    console.log(`Processing complete: $${totalAmount} total, ${validTransactions.length} transactions`);
+    console.log('Category breakdown:', summary);
+
+    return NextResponse.json({
+      ...result,
+      processingInfo: {
+        inputLength: text.length,
+        extractedTransactions: validTransactions.length,
+        processingMethod: 'AI Text Analysis'
+      }
+    });
 
   } catch (error) {
-    console.error('Error processing PDF:', error);
+    console.error('Error processing transaction text:', error);
     
-    // Return detailed error information
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    const errorStack = error instanceof Error ? error.stack : '';
-    
-    return NextResponse.json(
-      { 
-        error: errorMessage,
-        details: errorStack,
-        timestamp: new Date().toISOString()
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      error: 'Failed to process transaction text',
+      message: error instanceof Error ? error.message : 'Unknown error',
+      inputPreview: text.substring(0, 200)
+    }, { status: 500 });
   }
 }
