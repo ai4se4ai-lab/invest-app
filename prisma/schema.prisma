@@ -1,0 +1,73 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  categories    Category[]
+  transactions  Transaction[]
+  sessions      ProcessingSession[]
+
+  @@map("users")
+}
+
+model Category {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  name      String
+  color     String   @default("#3B82F6")
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@unique([userId, name])
+  @@map("categories")
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  categoryId  String   @map("category_id")
+  date        DateTime
+  description String
+  amount      Float
+  confidence  Float?
+  sourceFile  String?  @map("source_file")
+  sessionId   String?  @map("session_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category Category           @relation(fields: [categoryId], references: [id])
+  session  ProcessingSession? @relation(fields: [sessionId], references: [id])
+
+  @@map("transactions")
+}
+
+model ProcessingSession {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  fileName     String   @map("file_name")
+  totalAmount  Float    @map("total_amount")
+  inputMethod  String   @map("input_method") // "pdf" or "text"
+  inputContent String?  @map("input_content") // Store original text for reprocessing
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@map("processing_sessions")
+}
